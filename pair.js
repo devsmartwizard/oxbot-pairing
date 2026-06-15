@@ -20,6 +20,8 @@ router.get('/', async (req, res) => {
     let num = req.query.number;
     let dirs = './' + (num || `session`);
     let isLinked = false;
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = 3;
 
     // Remove existing session if present
     await removeFile(dirs);
@@ -121,11 +123,20 @@ router.get('/', async (req, res) => {
                     }
                     const statusCode = lastDisconnect?.error?.output?.statusCode;
 
-                    if (statusCode === 401) {
-                        console.log("❌ Logged out from WhatsApp. Need to generate new pair code.");
-                    } else {
-                        console.log("🔁 Connection closed — restarting...");
+                    if (statusCode === 401 || statusCode === 408) {
+                        console.log(`❌ Pairing socket stopped (code: ${statusCode}).`);
+                        try { OxBot.ws?.close(); } catch {}
+                        try { OxBot.end(); } catch {}
+                        removeFile(dirs);
+                    } else if (reconnectAttempts < maxReconnectAttempts) {
+                        reconnectAttempts++;
+                        console.log(`🔁 Connection closed — restarting (Attempt ${reconnectAttempts}/${maxReconnectAttempts})...`);
                         initiateSession();
+                    } else {
+                        console.log("❌ Max reconnect attempts reached. Stopping pairing socket.");
+                        try { OxBot.ws?.close(); } catch {}
+                        try { OxBot.end(); } catch {}
+                        removeFile(dirs);
                     }
                 }
             });
