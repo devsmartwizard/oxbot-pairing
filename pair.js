@@ -42,7 +42,7 @@ router.get('/', async (req, res) => {
 
         try {
             const { version, isLatest } = await fetchLatestBaileysVersion();
-            let KnightBot = makeWASocket({
+            let OxBot = makeWASocket({
                 version,
                 auth: {
                     creds: state.creds,
@@ -60,45 +60,34 @@ router.get('/', async (req, res) => {
                 maxRetries: 5,
             });
 
-            KnightBot.ev.on('connection.update', async (update) => {
+            OxBot.ev.on('connection.update', async (update) => {
                 const { connection, lastDisconnect, isNewLogin, isOnline } = update;
 
                 if (connection === 'open') {
                     console.log("✅ Connected successfully!");
-                    console.log("📱 Sending session file to user...");
+                    console.log("📱 Sending session ID to user...");
                     
                     try {
-                        const sessionKnight = fs.readFileSync(dirs + '/creds.json');
+                        const sessionContent = fs.readFileSync(dirs + '/creds.json', 'utf8');
+                        const b64 = Buffer.from(sessionContent).toString('base64');
+                        const sessionName = 'oxbot_' + num;
+                        const fullSession = sessionName + '::::' + b64;
 
-                        // Send session file to user
+                        // Send session ID to user
                         const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
-                        await KnightBot.sendMessage(userJid, {
-                            document: sessionKnight,
-                            mimetype: 'application/json',
-                            fileName: 'creds.json'
-                        });
-                        console.log("📄 Session file sent successfully");
+                        await OxBot.sendMessage(userJid, { text: fullSession });
+                        console.log("📄 Session ID sent successfully");
 
-                        // Send video thumbnail with caption
-                        await KnightBot.sendMessage(userJid, {
-                            image: { url: 'https://img.youtube.com/vi/-oz_u1iMgf8/maxresdefault.jpg' },
-                            caption: `🎬 *KnightBot MD V2.0 Full Setup Guide!*\n\n🚀 Bug Fixes + New Commands + Fast AI Chat\n📺 Watch Now: https://youtu.be/NjOipI2AoMk`
-                        });
-                        console.log("🎬 Video guide sent successfully");
+                        await delay(1500);
 
-                        // Send warning message
-                        await KnightBot.sendMessage(userJid, {
-                            text: `⚠️Do not share this file with anybody⚠️\n 
-┌┤✑  Thanks for using Knight Bot
-│└────────────┈ ⳹        
-│©2025 Mr Unique Hacker 
-└─────────────────┈ ⳹\n\n`
-                        });
+                        // Send warning/instructions message
+                        const instructions = `⚠️ *Do not share this session ID with anyone.*\n\nCopy the raw Session ID message above and paste it in your OxBot dashboard to connect your bot.`;
+                        await OxBot.sendMessage(userJid, { text: instructions });
                         console.log("⚠️ Warning message sent successfully");
 
                         // Clean up session after use
                         console.log("🧹 Cleaning up session...");
-                        await delay(1000);
+                        await delay(4000);
                         removeFile(dirs);
                         console.log("✅ Session cleaned up successfully");
                         console.log("🎉 Process completed successfully!");
@@ -131,13 +120,13 @@ router.get('/', async (req, res) => {
                 }
             });
 
-            if (!KnightBot.authState.creds.registered) {
+            if (!OxBot.authState.creds.registered) {
                 await delay(3000); // Wait 3 seconds before requesting pairing code
                 num = num.replace(/[^\d+]/g, '');
                 if (num.startsWith('+')) num = num.substring(1);
 
                 try {
-                    let code = await KnightBot.requestPairingCode(num);
+                    let code = await OxBot.requestPairingCode(num);
                     code = code?.match(/.{1,4}/g)?.join('-') || code;
                     if (!res.headersSent) {
                         console.log({ num, code });
@@ -151,7 +140,7 @@ router.get('/', async (req, res) => {
                 }
             }
 
-            KnightBot.ev.on('creds.update', saveCreds);
+            OxBot.ev.on('creds.update', saveCreds);
         } catch (err) {
             console.error('Error initializing session:', err);
             if (!res.headersSent) {

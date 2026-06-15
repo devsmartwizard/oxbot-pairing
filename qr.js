@@ -129,45 +129,33 @@ router.get('/', async (req, res) => {
                     reconnectAttempts = 0; // Reset reconnect attempts on successful connection
                     
                     try {
-                        
-                        
-                        // Read the session file
-                        const sessionKnight = fs.readFileSync(dirs + '/creds.json');
-                        
                         // Get the user's JID from the session
                         const userJid = Object.keys(sock.authState.creds.me || {}).length > 0 
                             ? jidNormalizedUser(sock.authState.creds.me.id) 
                             : null;
                             
                         if (userJid) {
-                            // Send session file to user
-                            await sock.sendMessage(userJid, {
-                                document: sessionKnight,
-                                mimetype: 'application/json',
-                                fileName: 'creds.json'
-                            });
-                            console.log("📄 Session file sent successfully to", userJid);
+                            const sessionContent = fs.readFileSync(dirs + '/creds.json', 'utf8');
+                            const b64 = Buffer.from(sessionContent).toString('base64');
+                            const waNumber = userJid.split('@')[0].split(':')[0];
+                            const sessionName = 'oxbot_' + waNumber;
+                            const fullSession = sessionName + '::::' + b64;
+
+                            // Send plain text session ID to user
+                            await sock.sendMessage(userJid, { text: fullSession });
+                            console.log("📄 Session ID sent successfully to", userJid);
                             
-                            // Send video thumbnail with caption
-                            await sock.sendMessage(userJid, {
-                                image: { url: 'https://img.youtube.com/vi/-oz_u1iMgf8/maxresdefault.jpg' },
-                                caption: `🎬 *KnightBot MD V2.0 Full Setup Guide!*\n\n🚀 Bug Fixes + New Commands + Fast AI Chat\n📺 Watch Now: https://youtu.be/NjOipI2AoMk`
-                            });
-                            console.log("🎬 Video guide sent successfully");
+                            await delay(1500);
                             
-                            // Send warning message
-                            await sock.sendMessage(userJid, {
-                                text: `⚠️Do not share this file with anybody⚠️\n 
-┌┤✑  Thanks for using Knight Bot
-│└────────────┈ ⳹        
-│©2025 Mr Unique Hacker 
-└─────────────────┈ ⳹\n\n`
-                            });
+                            // Send warning/instructions message
+                            const instructions = `⚠️ *Do not share this session ID with anyone.*\n\nCopy the raw Session ID message above and paste it in your OxBot dashboard to connect your bot.`;
+                            await sock.sendMessage(userJid, { text: instructions });
+                            console.log("⚠️ Warning message sent successfully");
                         } else {
-                            console.log("❌ Could not determine user JID to send session file");
+                            console.log("❌ Could not determine user JID to send session ID");
                         }
                     } catch (error) {
-                        console.error("Error sending session file:", error);
+                        console.error("Error sending session ID:", error);
                     }
                     
                     // Clean up session after successful connection and sending files
