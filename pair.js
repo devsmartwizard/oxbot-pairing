@@ -3,6 +3,7 @@ import fs from 'fs';
 import pino from 'pino';
 import { makeWASocket, useMultiFileAuthState, delay, makeCacheableSignalKeyStore, Browsers, jidNormalizedUser, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import pn from 'awesome-phonenumber';
+import { pairingSessions } from './sessionStore.js';
 
 const router = express.Router();
 
@@ -18,13 +19,28 @@ function removeFile(FilePath) {
 
 router.get('/', async (req, res) => {
     let num = req.query.number;
-    let dirs = './' + (num || `session`);
+    const sessionId = Date.now().toString() + Math.random().toString(36).substr(2, 9);
+    const dirs = './qr_sessions/session_' + sessionId;
     let isLinked = false;
     let reconnectAttempts = 0;
     const maxReconnectAttempts = 3;
 
-    // Remove existing session if present
-    await removeFile(dirs);
+    // Ensure qr_sessions directory exists
+    if (!fs.existsSync('./qr_sessions')) {
+        fs.mkdirSync('./qr_sessions', { recursive: true });
+    }
+
+    // Initialize session state
+    pairingSessions.set(sessionId, {
+        status: 'pending',
+        code: null,
+        sessionID: null,
+        error: null,
+        sock: null,
+        _ts: Date.now()
+    });
+
+    const sessionStoreEntry = pairingSessions.get(sessionId);
 
     // Clean the phone number - remove any non-digit characters
     num = num.replace(/[^0-9]/g, '');
@@ -32,6 +48,8 @@ router.get('/', async (req, res) => {
     // Validate the phone number using awesome-phonenumber
     const phone = pn('+' + num);
     if (!phone.isValid()) {
+        sessionStoreEntry.status = 'error';
+        sessionStoreEntry.error = 'Invalid phone number';
         if (!res.headersSent) {
             return res.status(400).send({ code: 'Invalid phone number. Please enter your full international number (e.g., 15551234567 for US, 447911123456 for UK, 84987654321 for Vietnam, etc.) without + or spaces.' });
         }
@@ -63,6 +81,8 @@ router.get('/', async (req, res) => {
                 maxRetries: 5,
             });
 
+            sessionStoreEntry.sock = OxBot;
+
             OxBot.ev.on('connection.update', async (update) => {
                 const { connection, lastDisconnect, isNewLogin, isOnline } = update;
 
@@ -76,6 +96,10 @@ router.get('/', async (req, res) => {
                         const b64 = Buffer.from(sessionContent).toString('base64');
                         const sessionName = 'oxbot_' + num;
                         const fullSession = sessionName + '::::' + b64;
+
+                        // Save the generated session to session store
+                        sessionStoreEntry.status = 'linked';
+                        sessionStoreEntry.sessionID = fullSession;
 
                         // Send session ID to user
                         const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
@@ -95,6 +119,7 @@ router.get('/', async (req, res) => {
                         try { OxBot.ws?.close(); } catch {}
                         try { OxBot.end(); } catch {}
                         removeFile(dirs);
+                        pairingSessions.delete(sessionId);
                         console.log("✅ Session cleaned up successfully");
                         console.log("🎉 Process completed successfully!");
                         // Do not exit the process, just finish gracefully
@@ -104,6 +129,9 @@ router.get('/', async (req, res) => {
                         try { OxBot.ws?.close(); } catch {}
                         try { OxBot.end(); } catch {}
                         removeFile(dirs);
+                        sessionStoreEntry.status = 'error';
+                        sessionStoreEntry.error = error.message;
+                        pairingSessions.delete(sessionId);
                         // Do not exit the process, just finish gracefully
                     }
                 }
@@ -125,18 +153,24 @@ router.get('/', async (req, res) => {
 
                     if (statusCode === 401 || statusCode === 408) {
                         console.log(`❌ Pairing socket stopped (code: ${statusCode}).`);
+                        sessionStoreEntry.status = 'error';
+                        sessionStoreEntry.error = `Socket stopped (code: ${statusCode})`;
                         try { OxBot.ws?.close(); } catch {}
                         try { OxBot.end(); } catch {}
                         removeFile(dirs);
+                        pairingSessions.delete(sessionId);
                     } else if (reconnectAttempts < maxReconnectAttempts) {
                         reconnectAttempts++;
                         console.log(`🔁 Connection closed — restarting (Attempt ${reconnectAttempts}/${maxReconnectAttempts})...`);
                         initiateSession();
                     } else {
                         console.log("❌ Max reconnect attempts reached. Stopping pairing socket.");
+                        sessionStoreEntry.status = 'error';
+                        sessionStoreEntry.error = 'Max reconnect attempts reached';
                         try { OxBot.ws?.close(); } catch {}
                         try { OxBot.end(); } catch {}
                         removeFile(dirs);
+                        pairingSessions.delete(sessionId);
                     }
                 }
             });
@@ -149,12 +183,18 @@ router.get('/', async (req, res) => {
                 try {
                     let code = await OxBot.requestPairingCode(num);
                     code = code?.match(/.{1,4}/g)?.join('-') || code;
+                    
+                    sessionStoreEntry.status = 'code_ready';
+                    sessionStoreEntry.code = code;
+
                     if (!res.headersSent) {
                         console.log({ num, code });
-                        await res.send({ code });
+                        await res.send({ code, id: sessionId });
                     }
                 } catch (error) {
                     console.error('Error requesting pairing code:', error);
+                    sessionStoreEntry.status = 'error';
+                    sessionStoreEntry.error = 'Failed to request pairing code';
                     if (!res.headersSent) {
                         res.status(503).send({ code: 'Failed to get pairing code. Please check your phone number and try again.' });
                     }
@@ -164,6 +204,8 @@ router.get('/', async (req, res) => {
             OxBot.ev.on('creds.update', saveCreds);
         } catch (err) {
             console.error('Error initializing session:', err);
+            sessionStoreEntry.status = 'error';
+            sessionStoreEntry.error = 'Service Unavailable';
             if (!res.headersSent) {
                 res.status(503).send({ code: 'Service Unavailable' });
             }

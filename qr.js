@@ -4,7 +4,7 @@ import pino from 'pino';
 import { makeWASocket, useMultiFileAuthState, makeCacheableSignalKeyStore, Browsers, jidNormalizedUser, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import { delay } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
-import qrcodeTerminal from 'qrcode-terminal';
+import { pairingSessions } from './sessionStore.js';
 
 const router = express.Router();
 
@@ -24,227 +24,226 @@ router.get('/', async (req, res) => {
     // Generate unique session for each request to avoid conflicts
     const sessionId = Date.now().toString() + Math.random().toString(36).substr(2, 9);
     const dirs = `./qr_sessions/session_${sessionId}`;
-    let isLinked = false;
 
     // Ensure qr_sessions directory exists
     if (!fs.existsSync('./qr_sessions')) {
         fs.mkdirSync('./qr_sessions', { recursive: true });
     }
 
-    async function initiateSession() {
-        // ✅ PERMANENT FIX: Create the session folder before anything
-        if (!fs.existsSync(dirs)) fs.mkdirSync(dirs, { recursive: true });
+    // Initialize session state
+    pairingSessions.set(sessionId, {
+        status: 'pending',
+        qr: null,
+        sessionID: null,
+        error: null,
+        sock: null,
+        _ts: Date.now()
+    });
 
-        const { state, saveCreds } = await useMultiFileAuthState(dirs);
+    const sessionStoreEntry = pairingSessions.get(sessionId);
 
-        try {
-            const { version, isLatest } = await fetchLatestBaileysVersion();
-            
-            let qrGenerated = false;
-            let responseSent = false;
+    // Start socket initialization in the background
+    initiateSession(sessionId, dirs, sessionStoreEntry).catch(err => {
+        console.error('Background socket connection error:', err);
+    });
 
-            // QR Code handling logic
-            const handleQRCode = async (qr) => {
-                if (qrGenerated || responseSent) return;
-                
-                qrGenerated = true;
-                console.log('🟢 QR Code Generated! Scan it with your WhatsApp app.');
-                console.log('📋 Instructions:');
-                console.log('1. Open WhatsApp on your phone');
-                console.log('2. Go to Settings > Linked Devices');
-                console.log('3. Tap "Link a Device"');
-                console.log('4. Scan the QR code below');
-                // Display QR in terminal
-                //qrcodeTerminal.generate(qr, { small: true });
-                try {
-                    // Generate QR code as data URL
-                    const qrDataURL = await QRCode.toDataURL(qr, {
-                        errorCorrectionLevel: 'M',
-                        type: 'image/png',
-                        quality: 0.92,
-                        margin: 1,
-                        color: {
-                            dark: '#000000',
-                            light: '#FFFFFF'
-                        }
-                    });
-
-                    if (!responseSent) {
-                        responseSent = true;
-                        console.log('QR Code generated successfully');
-                        await res.send({ 
-                            qr: qrDataURL, 
-                            message: 'QR Code Generated! Scan it with your WhatsApp app.',
-                            instructions: [
-                                '1. Open WhatsApp on your phone',
-                                '2. Go to Settings > Linked Devices',
-                                '3. Tap "Link a Device"',
-                                '4. Scan the QR code above'
-                            ]
-                        });
-                    }
-                } catch (qrError) {
-                    console.error('Error generating QR code:', qrError);
-                    if (!responseSent) {
-                        responseSent = true;
-                        res.status(500).send({ code: 'Failed to generate QR code' });
-                    }
-                }
-            };
-
-            // Improved Baileys socket configuration
-            const socketConfig = {
-                version,
-                logger: pino({ level: 'silent' }),
-                browser: Browsers.windows('Chrome'), // Using Browsers enum for better compatibility
-                auth: {
-                    creds: state.creds,
-                    keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
-                },
-                markOnlineOnConnect: false, // Disable to reduce connection issues
-                generateHighQualityLinkPreview: false, // Disable to reduce connection issues
-                defaultQueryTimeoutMs: 60000, // Increase timeout
-                connectTimeoutMs: 60000, // Increase connection timeout
-                keepAliveIntervalMs: 30000, // Keep connection alive
-                retryRequestDelayMs: 250, // Retry delay
-                maxRetries: 5, // Maximum retries
-            };
-
-            // Create socket and bind events
-            let sock = makeWASocket(socketConfig);
-            let reconnectAttempts = 0;
-            const maxReconnectAttempts = 3;
-
-            // Connection event handler function
-            const handleConnectionUpdate = async (update) => {
-                const { connection, lastDisconnect, qr } = update;
-                console.log(`🔄 Connection update: ${connection || 'undefined'}`);
-
-                if (qr && !qrGenerated) {
-                    await handleQRCode(qr);
-                }
-
-                if (connection === 'open') {
-                    console.log('✅ Connected successfully!');
-                    console.log('💾 Session saved to:', dirs);
-                    reconnectAttempts = 0; // Reset reconnect attempts on successful connection
-                    isLinked = true;
-                    
-                    try {
-                        // Get the user's JID from the session
-                        const userJid = Object.keys(sock.authState.creds.me || {}).length > 0 
-                            ? jidNormalizedUser(sock.authState.creds.me.id) 
-                            : null;
-                            
-                        if (userJid) {
-                            const sessionContent = fs.readFileSync(dirs + '/creds.json', 'utf8');
-                            const b64 = Buffer.from(sessionContent).toString('base64');
-                            const waNumber = userJid.split('@')[0].split(':')[0];
-                            const sessionName = 'oxbot_' + waNumber;
-                            const fullSession = sessionName + '::::' + b64;
-
-                            // Send plain text session ID to user
-                            await sock.sendMessage(userJid, { text: fullSession });
-                            console.log("📄 Session ID sent successfully to", userJid);
-                            
-                            await delay(1500);
-                            
-                            // Send warning/instructions message
-                            const instructions = `⚠️ *Do not share this session ID with anyone.*\n\nCopy the raw Session ID message above and paste it in your OxBot dashboard to connect your bot.`;
-                            await sock.sendMessage(userJid, { text: instructions });
-                            console.log("⚠️ Warning message sent successfully");
-                        } else {
-                            console.log("❌ Could not determine user JID to send session ID");
-                        }
-                    } catch (error) {
-                        console.error("Error sending session ID:", error);
-                    }
-                    
-                    // Clean up session after successful connection and sending files
-                    setTimeout(() => {
-                        console.log('🧹 Cleaning up session...');
-                        try { sock.ws?.close(); } catch {}
-                        try { sock.end(); } catch {}
-                        const deleted = removeFile(dirs);
-                        if (deleted) {
-                            console.log('✅ Session cleaned up successfully');
-                        } else {
-                            console.log('❌ Failed to clean up session folder');
-                        }
-                    }, 15000); // Wait 15 seconds before cleanup to ensure messages are sent
-                }
-
-                if (connection === 'close') {
-                    console.log('❌ Connection closed');
-                    if (isLinked) {
-                        console.log('ℹ️ Connection closed gracefully after successful link.');
-                        return;
-                    }
-                    if (lastDisconnect?.error) {
-                        console.log('❗ Last Disconnect Error:', lastDisconnect.error);
-                    }
-                    
-                    const statusCode = lastDisconnect?.error?.output?.statusCode;
-                    
-                    // Handle specific error codes
-                    if (statusCode === 401) {
-                        console.log('🔐 Logged out - need new QR code');
-                        removeFile(dirs);
-                    } else if (statusCode === 515 || statusCode === 503) {
-                        console.log(`🔄 Stream error (${statusCode}) - attempting to reconnect...`);
-                        reconnectAttempts++;
-                        
-                        if (reconnectAttempts <= maxReconnectAttempts) {
-                            console.log(`🔄 Reconnect attempt ${reconnectAttempts}/${maxReconnectAttempts}`);
-                            // Wait a bit before reconnecting
-                            setTimeout(() => {
-                                try {
-                                    sock = makeWASocket(socketConfig);
-                                    sock.ev.on('connection.update', handleConnectionUpdate);
-                                    sock.ev.on('creds.update', saveCreds);
-                                } catch (err) {
-                                    console.error('Failed to reconnect:', err);
-                                }
-                            }, 2000);
-                        } else {
-                            console.log('❌ Max reconnect attempts reached');
-                            if (!responseSent) {
-                                responseSent = true;
-                                res.status(503).send({ code: 'Connection failed after multiple attempts' });
-                            }
-                        }
-                    } else {
-                        console.log('🔄 Connection lost - attempting to reconnect...');
-                        // Let it reconnect automatically
-                    }
-                }
-            };
-
-            // Bind the event handler
-            sock.ev.on('connection.update', handleConnectionUpdate);
-
-            sock.ev.on('creds.update', saveCreds);
-
-            // Set a timeout to clean up if no QR is generated
-            setTimeout(() => {
-                if (!responseSent) {
-                    responseSent = true;
-                    res.status(408).send({ code: 'QR generation timeout' });
-                    removeFile(dirs);
-                }
-            }, 30000); // 30 second timeout
-
-        } catch (err) {
-            console.error('Error initializing session:', err);
-            if (!res.headersSent) {
-                res.status(503).send({ code: 'Service Unavailable' });
-            }
-            removeFile(dirs);
-        }
-    }
-
-    await initiateSession();
+    // Send the session ID immediately to the client so they can start polling
+    res.send({ success: true, id: sessionId });
 });
+
+async function initiateSession(sessionId, dirs, sessionStoreEntry) {
+    // Ensure the session folder exists
+    if (!fs.existsSync(dirs)) fs.mkdirSync(dirs, { recursive: true });
+
+    const { state, saveCreds } = await useMultiFileAuthState(dirs);
+
+    try {
+        const { version } = await fetchLatestBaileysVersion();
+        
+        let isLinked = false;
+
+        // QR Code handling logic
+        const handleQRCode = async (qr) => {
+            try {
+                // Generate QR code as data URL
+                const qrDataURL = await QRCode.toDataURL(qr, {
+                    errorCorrectionLevel: 'M',
+                    type: 'image/png',
+                    quality: 0.92,
+                    margin: 1,
+                    color: {
+                        dark: '#000000',
+                        light: '#FFFFFF'
+                    }
+                });
+
+                sessionStoreEntry.status = 'qr_ready';
+                sessionStoreEntry.qr = qrDataURL;
+            } catch (qrError) {
+                console.error('Error generating QR code:', qrError);
+            }
+        };
+
+        // Socket configuration
+        const socketConfig = {
+            version,
+            logger: pino({ level: 'silent' }),
+            browser: Browsers.windows('Chrome'),
+            auth: {
+                creds: state.creds,
+                keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
+            },
+            markOnlineOnConnect: false,
+            generateHighQualityLinkPreview: false,
+            defaultQueryTimeoutMs: 60000,
+            connectTimeoutMs: 60000,
+            keepAliveIntervalMs: 30000,
+            retryRequestDelayMs: 250,
+            maxRetries: 5,
+        };
+
+        // Create socket
+        let sock = makeWASocket(socketConfig);
+        sessionStoreEntry.sock = sock;
+
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 3;
+
+        // Connection event handler function
+        const handleConnectionUpdate = async (update) => {
+            const { connection, lastDisconnect, qr } = update;
+            console.log(`🔄 Connection update: ${connection || 'undefined'}`);
+
+            if (qr) {
+                await handleQRCode(qr);
+            }
+
+            if (connection === 'open') {
+                console.log('✅ Connected successfully!');
+                console.log('💾 Session saved to:', dirs);
+                reconnectAttempts = 0;
+                isLinked = true;
+                
+                try {
+                    // Get the user's JID from the session
+                    const userJid = sock.user?.id ? jidNormalizedUser(sock.user.id) : null;
+                        
+                    if (userJid) {
+                        const sessionContent = fs.readFileSync(dirs + '/creds.json', 'utf8');
+                        const b64 = Buffer.from(sessionContent).toString('base64');
+                        const waNumber = userJid.split('@')[0].split(':')[0];
+                        const sessionName = 'oxbot_' + waNumber;
+                        const fullSession = sessionName + '::::' + b64;
+
+                        // Save the generated session to session store
+                        sessionStoreEntry.status = 'linked';
+                        sessionStoreEntry.sessionID = fullSession;
+
+                        // Send plain text session ID to user
+                        await sock.sendMessage(userJid, { text: fullSession });
+                        console.log("📄 Session ID sent successfully to", userJid);
+                        
+                        await delay(1500);
+                        
+                        // Send warning/instructions message
+                        const instructions = `⚠️ *Do not share this session ID with anyone.*\n\nCopy the raw Session ID message above and paste it in your OxBot dashboard to connect your bot.`;
+                        await sock.sendMessage(userJid, { text: instructions });
+                        console.log("⚠️ Warning message sent successfully");
+                    } else {
+                        console.log("❌ Could not determine user JID to send session ID");
+                        sessionStoreEntry.status = 'error';
+                        sessionStoreEntry.error = 'Could not determine user ID';
+                    }
+                } catch (error) {
+                    console.error("Error sending session ID:", error);
+                    sessionStoreEntry.status = 'error';
+                    sessionStoreEntry.error = error.message;
+                }
+                
+                // Clean up session after successful connection and sending files
+                setTimeout(() => {
+                    console.log('🧹 Cleaning up session...');
+                    try { sock.ws?.close(); } catch {}
+                    try { sock.end(); } catch {}
+                    const deleted = removeFile(dirs);
+                    if (deleted) {
+                        console.log('✅ Session cleaned up successfully');
+                    } else {
+                        console.log('❌ Failed to clean up session folder');
+                    }
+                    pairingSessions.delete(sessionId);
+                }, 15000); // Wait 15 seconds before cleanup to ensure messages are sent
+            }
+
+            if (connection === 'close') {
+                console.log('❌ Connection closed');
+                if (isLinked) {
+                    console.log('ℹ️ Connection closed gracefully after successful link.');
+                    return;
+                }
+                
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                
+                // Handle specific error codes
+                if (statusCode === 401) {
+                    console.log('🔐 Logged out - need new QR code');
+                    sessionStoreEntry.status = 'error';
+                    sessionStoreEntry.error = 'Logged out from device';
+                    removeFile(dirs);
+                    pairingSessions.delete(sessionId);
+                } else if (statusCode === 515 || statusCode === 503) {
+                    console.log(`🔄 Stream error (${statusCode}) - attempting to reconnect...`);
+                    reconnectAttempts++;
+                    
+                    if (reconnectAttempts <= maxReconnectAttempts) {
+                        console.log(`🔄 Reconnect attempt ${reconnectAttempts}/${maxReconnectAttempts}`);
+                        // Wait a bit before reconnecting
+                        setTimeout(() => {
+                            try {
+                                sock = makeWASocket(socketConfig);
+                                sessionStoreEntry.sock = sock;
+                                sock.ev.on('connection.update', handleConnectionUpdate);
+                                sock.ev.on('creds.update', saveCreds);
+                            } catch (err) {
+                                console.error('Failed to reconnect:', err);
+                            }
+                        }, 2000);
+                    } else {
+                        console.log('❌ Max reconnect attempts reached');
+                        sessionStoreEntry.status = 'error';
+                        sessionStoreEntry.error = 'Connection failed after multiple attempts';
+                        pairingSessions.delete(sessionId);
+                    }
+                } else {
+                    console.log('🔄 Connection lost - attempting to reconnect...');
+                    // Let it reconnect automatically
+                }
+            }
+        };
+
+        // Bind the event handler
+        sock.ev.on('connection.update', handleConnectionUpdate);
+        sock.ev.on('creds.update', saveCreds);
+
+        // Set a timeout to clean up if no QR is generated/scanned
+        setTimeout(() => {
+            if (pairingSessions.has(sessionId) && !isLinked) {
+                sessionStoreEntry.status = 'error';
+                sessionStoreEntry.error = 'QR generation/connection timeout';
+                try { sock.end(); } catch {}
+                removeFile(dirs);
+                pairingSessions.delete(sessionId);
+            }
+        }, 180000); // 3 minute timeout
+
+    } catch (err) {
+        console.error('Error initializing session:', err);
+        sessionStoreEntry.status = 'error';
+        sessionStoreEntry.error = 'Service Unavailable';
+        removeFile(dirs);
+        pairingSessions.delete(sessionId);
+    }
+}
 
 // Global uncaught exception handler
 process.on('uncaughtException', (err) => {

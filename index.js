@@ -7,6 +7,7 @@ import path from 'path';
 import pairRouter from './pair.js';
 import qrRouter from './qr.js';
 import QRCode from 'qrcode';
+import { pairingSessions } from './sessionStore.js';
 
 const app = express();
 
@@ -32,6 +33,20 @@ app.get('/', (req, res) => {
 
 app.use('/pair', pairRouter);
 app.use('/qr', qrRouter);
+
+app.get('/status', (req, res) => {
+    const { id } = req.query;
+    if (!id) return res.status(400).send({ error: 'Session ID required' });
+    const session = pairingSessions.get(id);
+    if (!session) return res.status(404).send({ error: 'Session not found or expired' });
+    res.send({
+        status: session.status,
+        qr: session.qr || null,
+        code: session.code || null,
+        sessionID: session.sessionID || null,
+        error: session.error || null
+    });
+});
 
 app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);

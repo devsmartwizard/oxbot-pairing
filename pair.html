@@ -519,12 +519,76 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/axios/1.0.0-alpha.1/axios.min.js"></script>
   <script>
     let currentMode = 'pair';
+    let pollInterval = null;
+    window.latestSessionID = null;
+
+    function stopPolling() {
+      if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+      }
+    }
+
+    async function startPolling(id) {
+      stopPolling();
+      
+      const codeDisplay = document.getElementById("codeDisplay");
+      const qrDisplay = document.getElementById("qrDisplay");
+      const copyBtn = document.getElementById("copy");
+      const loadingSpinner = document.getElementById("loading");
+      
+      pollInterval = setInterval(async () => {
+        try {
+          const response = await axios(`/status?id=${id}`);
+          const data = response.data;
+          
+          if (data.status === 'qr_ready' && data.qr) {
+            loadingSpinner.style.display = "none";
+            document.getElementById('qrImage').src = data.qr;
+            document.getElementById('qrInstructions').innerHTML = "Scan this QR code with your WhatsApp app<br><span style='color: var(--primary-color); font-size: 11px;'>Refreshes automatically</span>";
+            qrDisplay.style.display = 'block';
+            codeDisplay.style.display = 'none';
+          } else if (data.status === 'code_ready' && data.code) {
+            loadingSpinner.style.display = "none";
+            codeDisplay.innerHTML = `<div class="success-message"><i class="fas fa-key"></i> CODE: ${data.code}</div>`;
+            codeDisplay.style.display = 'flex';
+            qrDisplay.style.display = 'none';
+          } else if (data.status === 'linked') {
+            stopPolling();
+            loadingSpinner.style.display = "none";
+            
+            codeDisplay.innerHTML = `<div class="success-message" style="flex-direction: column; gap: 8px;">
+              <div style="color: var(--primary-color); font-size: 18px;"><i class="fas fa-check-circle"></i> Connected Successfully!</div>
+              <div style="font-size: 11px; color: var(--text-secondary); word-break: break-all; margin-top: 5px; font-family: monospace; max-height: 80px; overflow-y: auto; padding: 5px; background: rgba(0,0,0,0.2); border-radius: 6px; border: 1px solid rgba(255,255,255,0.05);">${data.sessionID}</div>
+            </div>`;
+            codeDisplay.style.display = 'flex';
+            qrDisplay.style.display = 'none';
+            
+            // Set session ID globally and update copy button text
+            window.latestSessionID = data.sessionID;
+            copyBtn.innerHTML = '<i class="fas fa-copy"></i> Copy Session ID';
+            copyBtn.style.display = 'flex';
+          } else if (data.status === 'error') {
+            stopPolling();
+            loadingSpinner.style.display = "none";
+            codeDisplay.innerHTML = `<div class="error-message"><i class="fas fa-exclamation-circle"></i> ${data.error || 'Connection failed'}</div>`;
+            codeDisplay.style.display = 'flex';
+            qrDisplay.style.display = 'none';
+          }
+        } catch (error) {
+          console.error("Error polling status:", error);
+        }
+      }, 3000);
+    }
 
     // Toggle functionality
     document.querySelectorAll('.toggle-option').forEach(option => {
       option.addEventListener('click', function() {
         const mode = this.dataset.mode;
         if (mode === currentMode) return;
+
+        stopPolling();
+        window.latestSessionID = null;
 
         // Update active state
         document.querySelectorAll('.toggle-option').forEach(opt => opt.classList.remove('active'));
@@ -536,6 +600,8 @@
         // Update button and input visibility
         const submitBtn = document.getElementById('submit');
         const inputGroup = document.getElementById('inputGroup');
+        const copyBtn = document.getElementById('copy');
+        copyBtn.innerHTML = '<i class="fas fa-copy"></i> Copy Code';
         
         if (mode === 'pair') {
           submitBtn.innerHTML = '<i class="fas fa-key"></i> Generate Pair Code';
@@ -567,21 +633,19 @@
       try {
         const response = await axios('/qr');
         
-        if (response.data.qr) {
-          document.getElementById('qrImage').src = response.data.qr;
-          document.getElementById('qrInstructions').innerHTML = response.data.instructions.join('<br>');
-          qrDisplay.style.display = 'block';
-          codeDisplay.style.display = 'none';
+        if (response.data.success && response.data.id) {
+          // Start polling status
+          startPolling(response.data.id);
         } else {
-          codeDisplay.innerHTML = '<div class="error-message"><i class="fas fa-exclamation-circle"></i> Failed to generate QR code</div>';
+          loadingSpinner.style.display = "none";
+          codeDisplay.innerHTML = '<div class="error-message"><i class="fas fa-exclamation-circle"></i> Failed to initialize QR generation</div>';
           codeDisplay.style.display = 'flex';
         }
       } catch (error) {
         console.error("Error generating QR code:", error);
+        loadingSpinner.style.display = "none";
         codeDisplay.innerHTML = '<div class="error-message"><i class="fas fa-exclamation-circle"></i> Error generating QR code. Please try again.</div>';
         codeDisplay.style.display = 'flex';
-      } finally {
-        loadingSpinner.style.display = "none";
       }
     }
 
@@ -592,12 +656,17 @@
       const codeDisplay = document.getElementById("codeDisplay");
       const qrDisplay = document.getElementById("qrDisplay");
       const loadingSpinner = document.getElementById("loading");
+      const copyBtn = document.getElementById('copy');
 
       const mobileNumber = mobileNumberInput.value.trim();
       if (!mobileNumber) {
         codeDisplay.innerHTML = '<div class="error-message"><i class="fas fa-exclamation-circle"></i> Please enter your WhatsApp number</div>';
         return;
       }
+
+      stopPolling();
+      window.latestSessionID = null;
+      copyBtn.innerHTML = '<i class="fas fa-copy"></i> Copy Code';
 
       loadingSpinner.style.display = "block";
       codeDisplay.innerHTML = '';
@@ -608,23 +677,42 @@
         
         const code = response.data.code || "Service Unavailable";
         if (code === "Service Unavailable") {
+          loadingSpinner.style.display = "none";
           codeDisplay.innerHTML = '<div class="error-message"><i class="fas fa-exclamation-circle"></i> Service Unavailable</div>';
+          codeDisplay.style.display = 'flex';
         } else {
           codeDisplay.innerHTML = `<div class="success-message"><i class="fas fa-check-circle"></i> CODE: ${code}</div>`;
+          codeDisplay.style.display = 'flex';
+          
+          if (response.data.id) {
+            // Start polling status to detect when user scans/pairs successfully
+            startPolling(response.data.id);
+          } else {
+            loadingSpinner.style.display = "none";
+          }
         }
-        codeDisplay.style.display = 'flex';
       } catch (error) {
         console.error("Error generating code:", error);
+        loadingSpinner.style.display = "none";
         codeDisplay.innerHTML = '<div class="error-message"><i class="fas fa-exclamation-circle"></i> Error generating code. Please try again.</div>';
         codeDisplay.style.display = 'flex';
-      } finally {
-        loadingSpinner.style.display = "none";
       }
     });
+
     function copyCode() {
-      const codeDisplay = document.getElementById("codeDisplay").innerText;
-      const code = codeDisplay.replace('CODE: ', '');
-      navigator.clipboard.writeText(code).then(() => {
+      let textToCopy = "";
+      if (window.latestSessionID) {
+        textToCopy = window.latestSessionID;
+      } else {
+        const codeDisplay = document.getElementById("codeDisplay").innerText;
+        textToCopy = codeDisplay.replace('CODE: ', '');
+      }
+
+      if (!textToCopy || textToCopy.includes('Your pair code will appear here')) {
+        return;
+      }
+
+      navigator.clipboard.writeText(textToCopy).then(() => {
         const copyBtn = document.getElementById("copy");
         const originalText = copyBtn.innerHTML;
         copyBtn.innerHTML = '<i class="fas fa-check"></i> Copied!';
